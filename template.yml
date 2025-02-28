@@ -102,8 +102,8 @@ Resources:
           ToPort: 22
           CidrIp: 0.0.0.0/0
         - IpProtocol: tcp
-          FromPort: 3000
-          ToPort: 3000
+          FromPort: 80
+          ToPort: 80
           CidrIp: 0.0.0.0/0
 
   DocumentDBSecurityGroup:
@@ -156,28 +156,33 @@ Resources:
         - !Ref NestEC2SecurityGroup
       ImageId: ami-02a53b0d62d37a757
       UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          yum update -y
-          yum install -y git
-          curl -fsSL https://rpm.nodesource.com/setup_16.x | bash -
-          yum install -y nodejs
-          npm install -g pm2
+        Fn::Base64: !Sub 
+          - |
+            #!/bin/bash
+            yum update -y
+            yum install -y docker git
+            usermod -a -G docker ec2-user
+            systemctl start docker
+            systemctl enable docker
 
-          echo "export DOCDB_ENDPOINT=${DocumentDBCluster.Endpoint}" >> /home/ec2-user/.bashrc
-          echo "export DOCDB_USER=${MasterUsername}" >> /home/ec2-user/.bashrc
-          echo "export DOCDB_PASS=${MasterUserPassword}" >> /home/ec2-user/.bashrc
+            # Configurar variáveis de ambiente
+            echo "export DOCDB_ENDPOINT=${DocumentDBClusterEndpoint}" >> /home/ec2-user/.bashrc
+            echo "export DOCDB_USER=${MasterUsername}" >> /home/ec2-user/.bashrc
+            echo "export DOCDB_PASS=${MasterUserPassword}" >> /home/ec2-user/.bashrc
 
-          git clone https://github.com/victor-vbos/node-nestjs.git /home/ec2-user/nest-app
-          chown -R ec2-user:ec2-user /home/ec2-user/nest-app
+            # Clonar repositório
+            git clone https://github.com/victor-vbos/node-nestjs.git /home/ec2-user/nest-app
+            chown -R ec2-user:ec2-user /home/ec2-user/nest-app
 
-          su - ec2-user -c '
-            source ~/.bashrc
-            cd /home/ec2-user/nest-app 
-            npm install
-            npm run build
-            pm2 start dist/main.js --name nest-app
-          '
+            su - ec2-user -c '
+              source ~/.bashrc
+              cd /home/ec2-user/nest-app 
+              wget https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+              echo "MONGODB_URI=mongodb://${MasterUsername}:${MasterUserPassword}@${DocumentDBClusterEndpoint}:27017/?tls=true&tlsCAFile=global-bundle.pem&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false" > .env
+              docker build -t nestjs-api .
+              docker run --restart unless-stopped -p 80:3000 nestjs-api npm run start:dev
+            '
+          - DocumentDBClusterEndpoint: !GetAtt DocumentDBCluster.Endpoint
 
 Outputs:
   EC2PublicIP:
