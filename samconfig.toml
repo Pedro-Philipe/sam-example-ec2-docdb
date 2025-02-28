@@ -1,0 +1,14 @@
+version = 0.1
+
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "poc-nest-mongo"
+resolve_s3 = true
+s3_prefix = "poc"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = """
+KeyName=MinhaKeyPair \
+MasterUsername=nomeusuario \
+MasterUserPassword=12345678 
+"""

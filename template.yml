@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Deploy de API Nest em EC2 com DocumentDB
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Nome da chave SSH para acessar a instancia.
+  MasterUsername:
+    Type: String
+    Description: Usuário mestre do DocumentDB
+  MasterUserPassword:
+    Type: String
+    Description: Senha do usuário mestre
+    NoEcho: true
+
+Resources:
+  # Rede e VPC
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  # Subnets em 2 AZs diferentes
+  MySubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']  # Ex: us-east-1a
+      Tags:
+        - Key: Name
+          Value: MySubnet-Public-1a
+
+  MySubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']  # Ex: us-east-1b
+      Tags:
+        - Key: Name
+          Value: MySubnet-Public-1b
+
+  # Internet Gateway
+  MyIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyIGW
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref MyIGW
+
+  # Tabela de Rotas Pública
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MyIGW
+
+  # Associações das Subnets à Tabela de Rotas
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MySubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref MySubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  NestEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Acesso EC2"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+
+  DocumentDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Acesso ao DocumentDB"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 27017
+          ToPort: 27017
+          SourceSecurityGroupId: !Ref NestEC2SecurityGroup
+
+  # DocumentDB Subnet Group (com 2 subnets)
+  DocumentDBSubnetGroup:
+    Type: AWS::DocDB::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Subnet Group para DocumentDB"
+      SubnetIds:
+        - !Ref MySubnet1
+        - !Ref MySubnet2
+
+  DocumentDBCluster:
+    Type: AWS::DocDB::DBCluster
+    Properties:
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterUserPassword
+      DBClusterIdentifier: "nest-docdb-cluster"
+      EngineVersion: "4.0.0"
+      StorageEncrypted: true
+      VpcSecurityGroupIds:
+        - !GetAtt DocumentDBSecurityGroup.GroupId
+      DBSubnetGroupName: !Ref DocumentDBSubnetGroup
+
+  DocumentDBInstance:
+    Type: AWS::DocDB::DBInstance
+    Properties:
+      DBInstanceClass: db.t3.medium
+      DBClusterIdentifier: !Ref DocumentDBCluster
+
+  # EC2 Instance (usando MySubnet1)
+  NestEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: DocumentDBCluster
+    Properties:
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref MySubnet1  # Usa a subnet 1
+      SecurityGroupIds:
+        - !Ref NestEC2SecurityGroup
+      ImageId: ami-02a53b0d62d37a757
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y git
+          curl -fsSL https://rpm.nodesource.com/setup_16.x | bash -
+          yum install -y nodejs
+          npm install -g pm2
+
+          echo "export DOCDB_ENDPOINT=${DocumentDBCluster.Endpoint}" >> /home/ec2-user/.bashrc
+          echo "export DOCDB_USER=${MasterUsername}" >> /home/ec2-user/.bashrc
+          echo "export DOCDB_PASS=${MasterUserPassword}" >> /home/ec2-user/.bashrc
+
+          git clone https://github.com/victor-vbos/node-nestjs.git /home/ec2-user/nest-app
+          chown -R ec2-user:ec2-user /home/ec2-user/nest-app
+
+          su - ec2-user -c '
+            source ~/.bashrc
+            cd /home/ec2-user/nest-app 
+            npm install
+            npm run build
+            pm2 start dist/main.js --name nest-app
+          '
+
+Outputs:
+  EC2PublicIP:
+    Description: IP Público da Instância EC2
+    Value: !GetAtt NestEC2Instance.PublicIp
+  DocumentDBEndpoint:
+    Description: Endpoint do DocumentDB
+    Value: !GetAtt DocumentDBCluster.Endpoint
